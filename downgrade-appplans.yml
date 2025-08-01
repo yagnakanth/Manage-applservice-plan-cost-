@@ -1,0 +1,24 @@
+name: Downgrade App Service Plans
+
+on:
+  schedule:
+    - cron: '0 2 * * 6' # Runs every Saturday at 2 AM UTC
+  workflow_dispatch:
+
+jobs:
+  downgrade:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
+      - name: Login to Azure
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Run PowerShell to Downgrade Plans
+        shell: pwsh
+        run: |
+          ./scripts/AppServicePlanManager.ps1 -Action "Downgrade"
