@@ -1,0 +1,26 @@
+- name: Extract the PFX and Convert to PEM
+        id: extract_pfx
+        run: |
+            $pfxPath = Join-Path ${{ github.workspace }} "deploy/file.pfx"
+            [Convert]::FromBase64String($env:PFX_CERT) | Set-Content -Path $pfxPath -AsByteStream
+
+      - name: Convert PFX to PEM using OpenSSL
+        run: |
+          $pfxPath = Join-Path ${{ github.workspace }} "deploy/file.pfx"
+          $pemPath = Join-Path ${{ github.workspace }} "deploy/file.pem"
+          openssl pkcs12 -in $pfxPath -clcerts -nodes -out $pemPath -passin pass: -passout pass:
+
+      - id: login_to_azure
+        name: Login to Azure
+        run: |
+          $pemPath = Join-Path ${{ github.workspace }} "deploy/file.pem"
+          az login --service-principal -u ${{ secrets.ARM_CLIENT_ID }} --certificate $pemPath --tenant ${{ secrets.ARM_TENANT_ID }} --output none
+          az account set --subscription ${{ secrets.ARM_SUBSCRIPTION_ID }} --output none
+          
+      - name: Run PowerShell to Downgrade Plans
+        shell: pwsh
+        run: |
+          ./scripts/AppServicePlanManager.ps1 -Action "Downgrade"
+
+
+************
