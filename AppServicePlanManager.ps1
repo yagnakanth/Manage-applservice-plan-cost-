@@ -1,5 +1,5 @@
 param (
-    [string]$ConfigFile = "./Config.json",
+    [string]$ConfigFile = "config.json",
     [ValidateSet("downgrade", "restore")]
     [string]$Action
 )
@@ -11,10 +11,21 @@ function Get-Configuration {
 
 function Set-SubscriptionContext {
     param([string]$SubscriptionId)
+
+    if ([string]::IsNullOrWhiteSpace($SubscriptionId)) {
+        Write-Warning "SubscriptionId is null or empty. Cannot set context."
+        return $false
+    }
+
     try {
-        Set-AzContext -SubscriptionId $SubscriptionId | Out-Null
+        $context = Set-AzContext -SubscriptionId $SubscriptionId -ErrorAction Stop
+        if (-not $context) {
+            throw "Context not returned for subscription ${SubscriptionId}"
+        }
+        return $true
     } catch {
-        Write-Warning "Failed to set context for subscription ${SubscriptionId}"
+        Write-Warning "Failed to set context for subscription '${SubscriptionId}': $_"
+        return $false
     }
 }
 
@@ -30,7 +41,7 @@ function Backup-AppServicePlan {
         Location      = $Plan.Location
     }
 
-    $FileName = "${BackupPath}\${($Plan.Name)}_backup.json"
+    $FileName = Join-Path $BackupPath "${($Plan.Name)}_backup.json"
     $Backup | ConvertTo-Json -Depth 10 | Out-File -FilePath $FileName -Force
 }
 
@@ -41,24 +52,26 @@ function Restore-AppServicePlans {
     foreach ($File in $Files) {
         $Backup = Get-Content $File.FullName | ConvertFrom-Json
 
-        Set-SubscriptionContext -SubscriptionId (Get-AzContext).Subscription.Id
+        $SubscriptionId = (Get-AzContext).Subscription.Id
+        if ([string]::IsNullOrWhiteSpace($SubscriptionId)) {
+            Write-Error "Azure context not found. Ensure the workflow is properly authenticated."
+            continue
+        }
 
-        $Name = $Backup.Name
-        $RG = $Backup.ResourceGroup
-        $Tier = $Backup.Tier
-        $Size = $Backup.Size
-        $Workers = $Backup.Capacity
+        $success = Set-SubscriptionContext -SubscriptionId $SubscriptionId
+        if (-not $success) {
+            continue
+        }
 
-        Write-Host "Restoring: $Name..."
+        Write-Host "Restoring: $($Backup.Name)..."
         try {
-            Set-AzAppServicePlan -Name $Name -ResourceGroupName $RG `
-                -SkuTier $Tier -SkuName $Size -NumberOfWorkers $Workers
+            Set-AzAppServicePlan -Name $Backup.Name -ResourceGroupName $Backup.ResourceGroup `
+                -SkuTier $Backup.Tier -SkuName $Backup.Size -NumberOfWorkers $Backup.Capacity
         } catch {
-            Write-Warning "Failed to restore ${Name}: $_"
+            Write-Warning "Failed to restore $($Backup.Name): $_"
         }
     }
 }
-
 
 function Set-AppServicePlanToBasic {
     param($Plan)
@@ -86,15 +99,26 @@ function Invoke-AppServicePlanAction {
     }
 
     foreach ($Project in $Config.Projects) {
+        if ([string]::IsNullOrWhiteSpace($Project.SubscriptionId)) {
+            Write-Warning "Skipping project with missing SubscriptionId."
+            continue
+        }
+
         Write-Host "Processing Environment: ${Project.Environment} Subscription: ${Project.SubscriptionId}"
-        Set-SubscriptionContext -SubscriptionId ${Project.SubscriptionId}
-        
+
+        $success = Set-SubscriptionContext -SubscriptionId ${Project.SubscriptionId}
+        if (-not $success) {
+            Write-Error "Azure context not found. Ensure the workflow is properly authenticated."
+            continue
+        }
+
         $ResourceGroups = Get-AzResourceGroup | Select-Object -ExpandProperty ResourceGroupName
+
         foreach ($RG in $ResourceGroups) {
             try {
                 $Plans = Get-AzAppServicePlan -ResourceGroupName $RG
             } catch {
-                Write-Warning "Failed to retrieve App Service Plans in resource group ${RG}: $_"
+                Write-Warning "Failed to retrieve App Service Plans in resource group '${RG}': $_"
                 continue
             }
 
