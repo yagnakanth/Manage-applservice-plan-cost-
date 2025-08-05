@@ -1,22 +1,70 @@
 name: Downgrade App Service Plans
 
 on:
-  schedule:
-    - cron: '0 2 * * 6' # Runs every Saturday at 2 AM UTC
+  # schedule:
+  #   - cron: '0 2 * * 6' # Runs every Saturday at 2 AM UTC
   workflow_dispatch:
 
 jobs:
   downgrade:
     runs-on: ubuntu-latest
-
+    # runs-on: self-hosted
+    env: 
+      PFX_CERT: ${{ secrets.PFX_CERT }}
+      ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+      ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+      ARM_CLIENT_CERTIFICATE_PATH: "${{ github.workspace }}/deploy/file.pfx" # This is expected location of the generated pfx file
+    
+    defaults:
+      run:
+        shell: pwsh
     steps:
       - name: Checkout Repo
         uses: actions/checkout@v4
 
-      - name: Login to Azure
-        uses: azure/login@v1
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
+      # - name: Login to Azure
+      #   uses: azure/login@v1
+      #   with:
+      #     creds: ${{ secrets.AZURE_CREDENTIALS }}
+    
+      # Extract the content from secret and generate the pfx file    
+      - name: Extract the PFX and Convert to PEM
+        id: extract_pfx
+        run: |
+          $pfxPath = Join-Path ${{ github.workspace }} "deploy/file.pfx"
+          [Convert]::FromBase64String($env:PFX_CERT) | Set-Content -Path $pfxPath -AsByteStream
+
+      - name: Convert PFX to PEM using OpenSSL
+        run: |
+          $pfxPath = Join-Path ${{ github.workspace }} "deploy/file.pfx"
+          $pemPath = Join-Path ${{ github.workspace }} "deploy/file.pem"
+          openssl pkcs12 -in $pfxPath -clcerts -nodes -out $pemPath -passin pass: -passout pass:
+      
+      - name: Debug All Environment Variables
+        shell: pwsh
+        run: |
+          Write-Host "ARM_CLIENT_ID: $env:ARM_CLIENT_ID"
+          Write-Host "ARM_SUBSCRIPTION_ID: $env:ARM_SUBSCRIPTION_ID"
+          Write-Host "ARM_TENANT_ID: $env:ARM_TENANT_ID"
+          Write-Host "ARM_CLIENT_CERTIFICATE_PATH: $env:ARM_CLIENT_CERTIFICATE_PATH"
+          Write-Host "PFX_CERT (truncated): $($env:PFX_CERT.Substring(0,20))..."
+
+      
+      - id: login_to_azure
+        name: Login to Azure
+        shell: pwsh
+        run: |
+          $pemPath = Join-Path ${{ github.workspace }} "deploy/file.pem"
+          az login --service-principal -u $env:ARM_CLIENT_ID  --certificate $pemPath --tenant $env:ARM_TENANT_ID --output none
+          az account set --subscription $env:ARM_SUBSCRIPTION_ID --output none
+      
+      - name: Install Az powerShell Module
+        shell: pwsh
+        run: |
+          Install-Module -Name Az -Force -scope CurrentUser -Repository PSGallery -AllowClobber
+          Import-Module Az
+          Get-Module Az -ListAvailable
 
       - name: Run PowerShell to Downgrade Plans
         shell: pwsh
