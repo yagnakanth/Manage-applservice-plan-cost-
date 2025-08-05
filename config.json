@@ -5,8 +5,8 @@
       "SubscriptionId": "SUBSCRIPTION-ID-1" 
     },
     {
-      "Environment": "Prod",
-      "SubscriptionId": "SUBSCRIPTION-ID-2" 
+      "Environment": "sbx",
+      "SubscriptionId": "3e212b39-19b5-422d-a20e-d6736e401d48" 
     }
   ]
 }
