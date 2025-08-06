@@ -9,23 +9,17 @@ function Get-Configuration {
     return Get-Content $Path | ConvertFrom-Json
 }
 
-function Set-SubscriptionContext {
-    param([string]$SubscriptionId)
-
-    if ([string]::IsNullOrWhiteSpace($SubscriptionId)) {
-        Write-Warning "SubscriptionId is null or empty. Cannot set context."
-        return $false
-    }
-
+function Validate-AzContext {
     try {
-        $context = Set-AzContext -SubscriptionId $SubscriptionId -ErrorAction Stop
+        $context = Get-AzContext
         if (-not $context) {
-            throw "Context not returned for subscription ${SubscriptionId}"
+            throw "Azure context is null. Please ensure login is complete in GitHub Actions workflow."
         }
-        return $true
+        Write-Host "Using Azure Context - Subscription ID: $($context.Subscription.Id), Name: $($context.Subscription.Name)"
+        return $context
     } catch {
-        Write-Warning "Failed to set context for subscription '${SubscriptionId}': $_"
-        return $false
+        Write-Error "Unable to retrieve Azure context: $_"
+        return $null
     }
 }
 
@@ -43,6 +37,7 @@ function Backup-AppServicePlan {
 
     $FileName = Join-Path $BackupPath "${($Plan.Name)}_backup.json"
     $Backup | ConvertTo-Json -Depth 10 | Out-File -FilePath $FileName -Force
+    Write-Host "Backup created for: $($Plan.Name)"
 }
 
 function Restore-AppServicePlans {
@@ -52,21 +47,11 @@ function Restore-AppServicePlans {
     foreach ($File in $Files) {
         $Backup = Get-Content $File.FullName | ConvertFrom-Json
 
-        $SubscriptionId = (Get-AzContext).Subscription.Id
-        if ([string]::IsNullOrWhiteSpace($SubscriptionId)) {
-            Write-Error "Azure context not found. Ensure the workflow is properly authenticated."
-            continue
-        }
-
-        $success = Set-SubscriptionContext -SubscriptionId $SubscriptionId
-        if (-not $success) {
-            continue
-        }
-
         Write-Host "Restoring: $($Backup.Name)..."
         try {
             Set-AzAppServicePlan -Name $Backup.Name -ResourceGroupName $Backup.ResourceGroup `
                 -SkuTier $Backup.Tier -SkuName $Backup.Size -NumberOfWorkers $Backup.Capacity
+            Write-Host "Restored App Service Plan: $($Backup.Name)"
         } catch {
             Write-Warning "Failed to restore $($Backup.Name): $_"
         }
@@ -85,6 +70,7 @@ function Set-AppServicePlanToBasic {
     try {
         Set-AzAppServicePlan -Name ${Plan.Name} -ResourceGroupName ${Plan.ResourceGroup} `
             -SkuTier "Basic" -SkuName "B1" -NumberOfWorkers 1
+        Write-Host "Downgraded: ${Plan.Name} to Basic B1"
     } catch {
         Write-Warning "Failed to downgrade ${Plan.Name}: $_"
     }
@@ -92,6 +78,15 @@ function Set-AppServicePlanToBasic {
 
 function Invoke-AppServicePlanAction {
     param($Config, $Action)
+
+    $context = Validate-AzContext
+    if (-not $context) {
+        Write-Error "Azure context is not valid. Exiting script."
+        exit 1
+    }
+
+    $ActiveSubscriptionId = $context.Subscription.Id
+    Write-Host "`n=== Active Subscription: $ActiveSubscriptionId ===`n"
 
     $BackupPath = "./AppPlanBackups"
     if (!(Test-Path $BackupPath)) {
@@ -104,19 +99,20 @@ function Invoke-AppServicePlanAction {
             continue
         }
 
-        Write-Host "Processing Environment: ${Project.Environment} Subscription: ${Project.SubscriptionId}"
-
-        $success = Set-SubscriptionContext -SubscriptionId ${Project.SubscriptionId}
-        if (-not $success) {
-            Write-Error "Azure context not found. Ensure the workflow is properly authenticated."
+        if ($Project.SubscriptionId -ne $ActiveSubscriptionId) {
+            Write-Warning "Skipping: Config project is for SubscriptionId $($Project.SubscriptionId), but current context is $ActiveSubscriptionId."
             continue
         }
+
+        Write-Host "`nProcessing Environment: $($Project.Environment) Subscription: $($Project.SubscriptionId)"
+
         try {
             $ResourceGroups = Get-AzResourceGroup | Select-Object -ExpandProperty ResourceGroupName
         } catch {
             Write-Warning "Failed to retrieve resource groups: $_"
             continue
         }
+
         foreach ($RG in $ResourceGroups) {
             try {
                 $Plans = Get-AzAppServicePlan -ResourceGroupName $RG
