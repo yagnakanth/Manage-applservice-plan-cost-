@@ -1,88 +1,93 @@
 param (
-    [string]$ConfigFile = "./config.json",
+    [string]$ConfigFile = "config.json",
     [ValidateSet("downgrade", "restore")]
     [string]$Action
 )
 
-function Log-Group {
-    param ([string]$Name)
-    Write-Host "::group::$Name"
-}
-function Log-EndGroup {
-    Write-Host "::endgroup::"
-}
-
 function Get-Configuration {
     param([string]$Path)
-    Log-Group "Load Configuration"
-    Write-Host "Loading config from $Path..."
-    $config = Get-Content $Path | ConvertFrom-Json
-    Log-EndGroup
-    return $config
+    return Get-Content $Path | ConvertFrom-Json
 }
 
 function Set-SubscriptionContext {
     param([string]$SubscriptionId)
 
-    Log-Group "Set Context: $SubscriptionId"
+    if ([string]::IsNullOrWhiteSpace($SubscriptionId)) {
+        Write-Warning "SubscriptionId is null or empty. Cannot set context."
+        return $false
+    }
+
     try {
         $context = Set-AzContext -SubscriptionId $SubscriptionId -ErrorAction Stop
-        Write-Host "Context set to: $($context.Subscription.Name) ($SubscriptionId)"
-        Log-EndGroup
+        if (-not $context) {
+            throw "Context not returned for subscription ${SubscriptionId}"
+        }
         return $true
     } catch {
         Write-Warning "Failed to set context for subscription '${SubscriptionId}': $_"
-        Log-EndGroup
         return $false
     }
 }
 
 function Backup-AppServicePlan {
     param($Plan, $BackupPath)
+
+    $Backup = @{
+        Name          = $Plan.Name
+        ResourceGroup = $Plan.ResourceGroup
+        Tier          = $Plan.Sku.Tier
+        Size          = $Plan.Sku.Name
+        Capacity      = $Plan.Sku.Capacity
+        Location      = $Plan.Location
+    }
+
     $FileName = Join-Path $BackupPath "${($Plan.Name)}_backup.json"
-    Log-Group "Backup Plan: $($Plan.Name)"
-    Write-Host "Backing up $($Plan.Name) to $FileName"
-    $Plan | ConvertTo-Json -Depth 10 | Out-File -FilePath $FileName -Force
-    Log-EndGroup
+    $Backup | ConvertTo-Json -Depth 10 | Out-File -FilePath $FileName -Force
 }
 
 function Restore-AppServicePlans {
     param($BackupPath)
 
-    Log-Group "Restore App Service Plans"
     $Files = Get-ChildItem -Path $BackupPath -Filter "*_backup.json"
     foreach ($File in $Files) {
         $Backup = Get-Content $File.FullName | ConvertFrom-Json
-        $success = Set-SubscriptionContext -SubscriptionId (Get-AzContext).Subscription.Id
-        if (-not $success) { continue }
 
+        $SubscriptionId = (Get-AzContext).Subscription.Id
+        if ([string]::IsNullOrWhiteSpace($SubscriptionId)) {
+            Write-Error "Azure context not found. Ensure the workflow is properly authenticated."
+            continue
+        }
+
+        $success = Set-SubscriptionContext -SubscriptionId $SubscriptionId
+        if (-not $success) {
+            continue
+        }
+
+        Write-Host "Restoring: $($Backup.Name)..."
         try {
-            Write-Host "Restoring $($Backup.Name)..."
             Set-AzAppServicePlan -Name $Backup.Name -ResourceGroupName $Backup.ResourceGroup `
                 -SkuTier $Backup.Tier -SkuName $Backup.Size -NumberOfWorkers $Backup.Capacity
         } catch {
             Write-Warning "Failed to restore $($Backup.Name): $_"
         }
     }
-    Log-EndGroup
 }
 
 function Set-AppServicePlanToBasic {
     param($Plan)
 
-    Log-Group "Downgrade Plan: $($Plan.Name)"
     if ($Plan.Sku.Tier -eq "Basic" -and $Plan.Sku.Name -eq "B1") {
         Write-Host "Skipping: ${Plan.Name} is already B1"
-    } else {
-        Write-Host "Downgrading ${Plan.Name} to Basic B1"
-        try {
-            Set-AzAppServicePlan -Name ${Plan.Name} -ResourceGroupName ${Plan.ResourceGroup} `
-                -SkuTier "Basic" -SkuName "B1" -NumberOfWorkers 1
-        } catch {
-            Write-Warning "Failed to downgrade ${Plan.Name}: $_"
-        }
+        return
     }
-    Log-EndGroup
+
+    Write-Host "Setting: ${Plan.Name} to B1 (Basic)..."
+    try {
+        Set-AzAppServicePlan -Name ${Plan.Name} -ResourceGroupName ${Plan.ResourceGroup} `
+            -SkuTier "Basic" -SkuName "B1" -NumberOfWorkers 1
+    } catch {
+        Write-Warning "Failed to downgrade ${Plan.Name}: $_"
+    }
 }
 
 function Invoke-AppServicePlanAction {
@@ -94,20 +99,29 @@ function Invoke-AppServicePlanAction {
     }
 
     foreach ($Project in $Config.Projects) {
-        $SubscriptionId = $Project.SubscriptionId
-        Write-Host ">>> Processing: Environment=${Project.Environment}, SubscriptionId=$SubscriptionId"
-
-        $success = Set-SubscriptionContext -SubscriptionId $SubscriptionId
-        if (-not $success) {
+        if ([string]::IsNullOrWhiteSpace($Project.SubscriptionId)) {
+            Write-Warning "Skipping project with missing SubscriptionId."
             continue
         }
 
-        $ResourceGroups = Get-AzResourceGroup | Select-Object -ExpandProperty ResourceGroupName
+        Write-Host "Processing Environment: ${Project.Environment} Subscription: ${Project.SubscriptionId}"
+
+        $success = Set-SubscriptionContext -SubscriptionId ${Project.SubscriptionId}
+        if (-not $success) {
+            Write-Error "Azure context not found. Ensure the workflow is properly authenticated."
+            continue
+        }
+        try {
+            $ResourceGroups = Get-AzResourceGroup | Select-Object -ExpandProperty ResourceGroupName
+        } catch {
+            Write-Warning "Failed to retrieve resource groups: $_"
+            continue
+        }
         foreach ($RG in $ResourceGroups) {
             try {
                 $Plans = Get-AzAppServicePlan -ResourceGroupName $RG
             } catch {
-                Write-Warning "Cannot fetch plans in $RG: $_"
+                Write-Warning "Failed to retrieve App Service Plans in resource group '${RG}': $_"
                 continue
             }
 
@@ -117,18 +131,18 @@ function Invoke-AppServicePlanAction {
                     Set-AppServicePlanToBasic -Plan $Plan
                 } elseif ($Action -eq "restore") {
                     Restore-AppServicePlans -BackupPath $BackupPath
-                    break
+                    break  # Only need to restore once from backup
                 }
             }
         }
     }
 }
 
-# ------- Main -------
-Write-Host "::group::Start Execution"
-Write-Host "ConfigFile: $ConfigFile"
-Write-Host "Action: $Action"
-Write-Host "::endgroup::"
-
-$Configuration = Get-Configuration -Path $ConfigFile
-Invoke-AppServicePlanAction -Config $Configuration -Action $Action
+# -------- Main Execution --------
+try {
+    $Configuration = Get-Configuration -Path $ConfigFile
+    Invoke-AppServicePlanAction -Config $Configuration -Action $Action
+} catch {
+    Write-Error "Script execution failed: $_"
+    exit 1
+}
