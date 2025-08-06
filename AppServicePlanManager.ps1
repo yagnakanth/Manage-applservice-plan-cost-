@@ -56,7 +56,7 @@ function Invoke-AppServicePlanAction {
             continue
         }
 
-        Write-Host "[$Environment] Processing Resource Group: $ResourceGroup" # 🔄 Changed
+        Write-Host "[${Environment}] Processing Resource Group: $ResourceGroup" # 🔄 Changed
 
         try {
             $Plans = Get-AzAppServicePlan -ResourceGroupName $ResourceGroup # 🔄 Changed
@@ -68,9 +68,9 @@ function Invoke-AppServicePlanAction {
                     if ($Plan.Sku.Tier -eq "PremiumV2" -or $Plan.Sku.Tier -eq "PremiumV3") {
                         Write-Host "Downgrading $($Plan.Name) to B1..."
                         Set-AzAppServicePlan -ResourceGroupName $Plan.ResourceGroup -Name $Plan.Name -Tier "Basic" -WorkerSize 0
-                        $Results += "$Environment - $($Plan.Name) downgraded to Basic (B1)"
+                        $Results += "${Environment} - $($Plan.Name) downgraded to Basic (B1)" # 🔄 Fixed
                     } else {
-                        $Results += "$Environment - $($Plan.Name) is already at or below Basic tier."
+                        $Results += "${Environment} - $($Plan.Name) is already at or below Basic tier." # 🔄 Fixed
                     }
                 }
 
@@ -81,8 +81,8 @@ function Invoke-AppServicePlanAction {
                     $planName = $Backup.Name
                     $sku = $Backup.Sku
                     Write-Host "Restoring $planName to $($sku.Tier) ($($sku.Name))..."
-                    Set-AzAppServicePlan -ResourceGroupName $ResourceGroup -Name $planName -Tier $sku.Tier -WorkerSize $sku.Capacity # 🔄 Changed
-                    $Results += "$Environment - $planName restored to $($sku.Tier) ($($sku.Name))"
+                    Set-AzAppServicePlan -ResourceGroupName $ResourceGroup -Name $planName -Tier $sku.Tier -WorkerSize $sku.Capacity
+                    $Results += "${Environment} - $planName restored to $($sku.Tier) ($($sku.Name))" # 🔄 Fixed
                 }
             }
 
